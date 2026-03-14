@@ -26,6 +26,8 @@ class Bundler():
         #List of frameworks moved into the bundle which need to be set
         #up for private use.
         self.frameworks = []
+        # Track binaries already processed by install_name_tool to avoid duplicate processing
+        self.processed_binaries = set()
 
         # Create the bundle in a temporary location first and move it
         # to the final destination when done.
@@ -185,6 +187,9 @@ class Bundler():
                 continue
             if path.compute_destination(self.project) in binaries:
                 continue
+            # Store processed_binaries on Binary instances before copying
+            if isinstance(path, Binary):
+                path.processed_binaries = self.processed_binaries
             copied_paths = path.copy_target(self.project)
             if isinstance(copied_paths, str):
                 print(f'Warning: copy_target returned string {copied_paths}')
@@ -418,6 +423,9 @@ class Bundler():
         # Frameworks
         frameworks = self.project.get_frameworks()
         for path in frameworks:
+            # Store processed_binaries on Framework instances before copying
+            if isinstance(path, Binary):
+                path.processed_binaries = self.processed_binaries
             dest = path.copy_target(self.project)
             self.frameworks.append(dest)
 
@@ -428,6 +436,8 @@ class Bundler():
 
         self.create_gdk_pixbuf_loaders_setup()
 
+        # Store processed_binaries on main binary before final copy
+        main_binary_path.processed_binaries = self.processed_binaries
         main_binary_path.copy_target(self.project)
 
         launcher_script = self.project.get_launcher_script()

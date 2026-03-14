@@ -88,7 +88,7 @@ class Path():
 
         return True
 
-    def copy_file(self, dummy_project, source, dest):
+    def copy_file(self, dummy_project, source, dest, processed_binaries=None):
         try:
             # print(f'Copying {source} to {dest}')
             shutil.copy2(source, dest)
@@ -103,6 +103,8 @@ class Path():
 
     def copy_target_glob_recursive(self, the_project, source, dest):
         source_parent, source_tail = os.path.split(source)
+        # Get processed_binaries from instance if available
+        processed_binaries = getattr(self, 'processed_binaries', None)
         for root, dummy_dirs, dummy_files in os.walk(source_parent):
             destdir = os.path.join(dest, os.path.relpath(root, source_parent))
             glob_list = glob.glob(os.path.join(root, source_tail))
@@ -111,24 +113,28 @@ class Path():
             utils.makedirs(destdir)
             for globbed_source in glob_list:
                 if os.path.isfile(globbed_source):
-                    self.copy_file(the_project, globbed_source, destdir)
+                    self.copy_file(the_project, globbed_source, destdir, processed_binaries)
 
     def copy_target_recursive(self, the_project, source, dest):
+        # Get processed_binaries from instance if available
+        processed_binaries = getattr(self, 'processed_binaries', None)
         for root, dummy_dirs, files in os.walk(source):
             destdir = os.path.join(dest, os.path.relpath(root, source))
             if not files:
                 continue
             utils.makedirs(destdir)
             for file in files:
-                self.copy_file(the_project, os.path.join(root, file), destdir)
+                self.copy_file(the_project, os.path.join(root, file), destdir, processed_binaries)
 
 
     def copy_target_glob(self, the_project, source, dest):
+        # Get processed_binaries from instance if available
+        processed_binaries = getattr(self, 'processed_binaries', None)
         for globbed_source in glob.glob(source):
             if os.path.isdir(globbed_source):
                 self.copy_target_recursive(the_project, globbed_source, dest)
             else:
-                self.copy_file(the_project, globbed_source, dest)
+                self.copy_file(the_project, globbed_source, dest, processed_binaries)
 
     def compute_destination(self, the_project):
         if self.dest:
@@ -235,17 +241,21 @@ class Binary(Path):
         self.bundledir = 'Resources'
         self.destinations = []
 
-    def copy_file(self, the_project, source, dest):
+    def copy_file(self, the_project, source, dest, processed_binaries=None):
         dummy_path, ext = os.path.splitext(source)
         # Skip static libs and libtool files:
         if ext in ('.la', '.a'):
             return
-        super().copy_file(the_project, source, dest)
+        super().copy_file(the_project, source, dest, processed_binaries)
         if os.path.isdir(dest):
             dest = os.path.join(dest, os.path.split(source)[1])
         # print(f"Copy binary file {source} to "
         #       "{'directory' if os.path.isdir(dest) else 'file'} {dest}")
-        self.fix_rpaths(the_project, dest)
+        # Get processed_binaries from instance if not passed as parameter
+        if processed_binaries is None and hasattr(self, 'processed_binaries'):
+            processed_binaries = self.processed_binaries
+        # Pass processed_binaries to fix_rpaths
+        self.fix_rpaths(the_project, dest, frameworks=None, processed_binaries=processed_binaries)
         # self.strip_debugging(dest)
         self.sign(the_project, dest)
         self.destinations.append(dest)
@@ -263,13 +273,27 @@ class Binary(Path):
             super().copy_target(the_project)
         return self.destinations
 
-    def fix_rpaths(self, the_project, target, frameworks = None):
+    def fix_rpaths(self, the_project, target, frameworks = None, processed_binaries=None):
         if not the_project.get_meta().run_install_name_tool:
             return
+        
+        # Normalize target path
+        target = os.path.abspath(target)
+        
+        # Check if already processed
+        if processed_binaries is not None and target in processed_binaries:
+            # Uncomment for debugging
+            print(f"Skipping already processed binary: {target}")
+            return
+        
         # Byte compiled scheme and python files don't have rpaths.
         if (target.endswith('.go') or target.endswith('.pyc') or
             target.endswith('.pyo')):
             return
+        
+        # Debug: Show when we're processing a binary
+        print(f"Processing binary with install_name_tool: {target}")
+        
         cmd = os.path.join(os.path.dirname(__file__),
                            "run-install-name-tool-change.sh")
         for prefix in the_project.get_meta().prefixes:
@@ -281,7 +305,12 @@ class Binary(Path):
             call([cmd, target, '@rpath', bundle_libdir, "id"])
             if hasattr(frameworks, '__iter__'):
                 for fw in frameworks:
-                    fw.fix_rpaths(the_project, fw, frameworks)
+                    fw.fix_rpaths(the_project, fw, frameworks, processed_binaries)
+        
+        # Mark as processed
+        if processed_binaries is not None:
+            processed_binaries.add(target)
+            print(f"Marked as processed: {target}")
 
     def sign(self, the_project, target):
         if "APPLICATION_CERT" not in os.environ:
@@ -324,10 +353,18 @@ class Framework(Binary):
     def get_bundle_name(self):
         return os.path.join(self.bundledir, self.get_name())
 
-    def fix_rpaths(self, the_project, target, frameworks = None):
+    def fix_rpaths(self, the_project, target, frameworks = None, processed_binaries=None):
         if not the_project.get_meta().run_install_name_tool:
             return
+        
+        # Normalize target path
         dest = self.compute_destination(the_project)
+        dest = os.path.abspath(dest)
+        
+        # Check if already processed
+        if processed_binaries is not None and dest in processed_binaries:
+            return
+        
         cmd = os.path.join(os.path.dirname(__file__),
                            "run-install-name-tool-change.sh")
         check_call([cmd, dest, self.get_name(), self.bundledir, 'id'])
@@ -337,6 +374,12 @@ class Framework(Binary):
                     continue
                 check_call([cmd, dest, dep.get_name(),
                             dep.get_bundle_name(), 'change'])
+                # Recursively pass processed_binaries to framework dependencies
+                dep.fix_rpaths(the_project, dep, frameworks, processed_binaries)
+        
+        # Mark as processed
+        if processed_binaries is not None:
+            processed_binaries.add(dest)
 
 class Translation(Path):
     def __init__(self, name, sourcepath, destpath, recurse):
