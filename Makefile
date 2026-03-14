@@ -14,7 +14,7 @@ bindir=$(shell dirname "`which brew`")
 endif
 ifeq ($(bindir),.)
 # Set default path
-bindir=$(HOME)/.local/bin
+bindir=$(HOME)/.new_local/bin
 endif
 
 all:
